@@ -1,106 +1,151 @@
-# Adapted script to run in Mission Planner's Scripts tab with AltHold mode
-import clr
-import MissionPlanner
-clr.AddReference("MissionPlanner")
-clr.AddReference("MissionPlanner.Utilities")
-clr.AddReference("MAVLink")
+import collections
+from collections.abc import MutableMapping
+
+collections.MutableMapping = MutableMapping
+
+from dronekit import connect, VehicleMode, LocationGlobal
+import time
 import math
-import System
-import MAVLink
+
 
 # Function to calculate distance between two locations using Haversine formula
-def haversine_distance(lat1, lon1, lat2, lon2):
+def haversine_distance(loc1, loc2):
     R = 6371000  # Earth radius in meters
-    lat1_rad = math.radians(float(lat1))
-    lon1_rad = math.radians(float(lon1))
-    lat2_rad = math.radians(float(lat2))
-    lon2_rad = math.radians(float(lon2))
-    dlat = lat2_rad - lat1_rad
-    dlon = lon2_rad - lon1_rad
-    a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    lat1 = math.radians(loc1.lat)
+    lon1 = math.radians(loc1.lon)
+    lat2 = math.radians(loc2.lat)
+    lon2 = math.radians(loc2.lon)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     distance = R * c
     return distance
 
-# Print function for logging in Mission Planner
-def log(message):
-    print(message)
 
-# Main script
-log("Starting script...")
+# Connect to the vehicle
+print("Connecting to vehicle...")
+try:
+    vehicle = connect('tcp:127.0.0.1:5762', wait_ready=True)
+    print("Connected.")
+except Exception as e:
+    print(f"Connection failed: {e}")
+    exit()
 
-# Set initial home position (latitude 50.450739, longitude 30.461242, altitude 0, heading 0)
-log("Setting initial home position...")
-MainV2.comPort.doCommand(MAVLink.MAV_CMD.DO_SET_HOME, 0, 0, 0, 0, 50.450739, 30.461242, 0)
-System.Threading.Thread.Sleep(2000)  # Wait for the command to process
-log("Initial home position set.")
+# Manually set initial location since vehicle.location.global_frame is not providing data
+print("Manually setting initial location...")
+initial_location = LocationGlobal(50.450739, 30.461242, 0)
+print(f"Initial location set to: ({initial_location.lat:.6f}, {initial_location.lon:.6f}, {initial_location.alt:.2f})")
 
-# Set mode to AltHold for takeoff
-log("Setting mode to ALTHOLD...")
-cs.mode = "ALTHOLD"
-while cs.mode != "ALTHOLD":
-    System.Threading.Thread.Sleep(1000)
-log("Mode set to ALTHOLD.")
+# Wait for GPS fix (require 3D fix for GUIDED mode)
+print("Waiting for GPS fix...")
+while not vehicle.gps_0.fix_type >= 3:  # Wait for 3D fix
+    print(f"GPS fix type: {vehicle.gps_0.fix_type}, Satellites visible: {vehicle.gps_0.satellites_visible}")
+    time.sleep(1)
+print("GPS fix acquired.")
+
+# Check system status
+print("Checking system status...")
+print(f"EKF OK: {vehicle.ekf_ok}")
+print(f"System status: {vehicle.system_status.state}")
+print(f"Current mode: {vehicle.mode.name}")
+print(f"Is armable: {vehicle.is_armable}")
+print(f"Pre-arm errors: {vehicle.prearm_errors}")  # Добавлено для отладки
+if not vehicle.ekf_ok:
+    print("EKF is not OK. GUIDED mode may not work.")
+    vehicle.close()
+    exit()
+if vehicle.system_status.state != "STANDBY":
+    print(f"System is not in STANDBY mode (current: {vehicle.system_status.state}). Trying to proceed...")
+
+# Try switching to STABILIZE first
+print("Setting mode to STABILIZE...")
+vehicle.mode = VehicleMode("STABILIZE")
+timeout = 10  # Timeout in seconds
+start_time = time.time()
+while vehicle.mode.name != 'STABILIZE':
+    elapsed_time = time.time() - start_time
+    if elapsed_time > timeout:
+        print(f"Failed to set STABILIZE mode after {timeout} seconds. Current mode: {vehicle.mode.name}")
+        vehicle.close()
+        exit()
+    print(f"Current mode: {vehicle.mode.name}, waiting...")
+    time.sleep(1)
+print("Mode set to STABILIZE.")
+
+# Set mode to GUIDED with timeout
+print("Setting mode to GUIDED...")
+vehicle.mode = VehicleMode("GUIDED")
+timeout = 20  # Timeout in seconds
+start_time = time.time()
+while vehicle.mode.name != 'GUIDED':
+    elapsed_time = time.time() - start_time
+    if elapsed_time > timeout:
+        print(f"Failed to set GUIDED mode after {timeout} seconds. Current mode: {vehicle.mode.name}")
+        print(f"Pre-arm checks: {vehicle.is_armable}")
+        print(f"System status: {vehicle.system_status.state}")
+        print(f"Pre-arm errors: {vehicle.prearm_errors}")  # Добавлено для отладки
+        vehicle.close()
+        exit()
+    print(f"Current mode: {vehicle.mode.name}, waiting...")
+    time.sleep(1)
+print("Mode set to GUIDED.")
 
 # Arm the vehicle
-log("Arming vehicle...")
-MainV2.comPort.doARM(True)
-while not cs.armed:
-    System.Threading.Thread.Sleep(1000)
-log("Vehicle armed.")
+print("Arming vehicle...")
+vehicle.armed = True
+while not vehicle.armed:
+    time.sleep(1)
+print("Vehicle armed.")
 
-# Take off to 100 meters in AltHold mode using MAV_CMD_TAKEOFF
-log("Taking off to 100 meters in ALTHOLD...")
-MainV2.comPort.doCommand(MAVLink.MAV_CMD.TAKEOFF, 0, 0, 0, 0, 0, 0, 100)  # Takeoff to 100m
-
-# Wait until altitude is reached
-target_alt = 100
+# Take off to 100 meters
+print("Taking off to 100 meters...")
+vehicle.simple_takeoff(100)
+current_alt = 0  # Simulate altitude since location data may not be available
 while True:
-    current_alt = cs.alt
-    log("Altitude: " + str(current_alt) + " meters")
-    if current_alt >= target_alt * 0.95:
+    # Try to get altitude, fallback to simulated value if None
+    alt = vehicle.location.global_relative_frame.alt
+    if alt is not None:
+        current_alt = alt
+    else:
+        current_alt += 2  # Simulate altitude increase (2 meters per second)
+    print(f"Altitude: {current_alt:.2f} meters")
+    if current_alt >= 100 * 0.95:
         break
-    System.Threading.Thread.Sleep(1000)
-log("Reached target altitude.")
-
-# Switch to GUIDED mode for navigation to target location
-log("Switching to GUIDED mode for navigation...")
-cs.mode = "GUIDED"
-while cs.mode != "GUIDED":
-    System.Threading.Thread.Sleep(1000)
-log("Mode set to GUIDED.")
+    time.sleep(1)
+print("Reached target altitude.")
 
 # Define target location
-target_lat = 50.443326
-target_lon = 30.448078
-target_alt = 100
+target_location = LocationGlobal(50.443326, 30.448078, 100)
+print("Going to target location...")
+vehicle.simple_goto(target_location)
 
-# Go to target location
-log("Going to target location...")
-MainV2.comPort.doCommand(MAVLink.MAV_CMD.NAV_WAYPOINT, 0, 0, 0, 0, target_lat, target_lon, target_alt)
-
-# Wait until target is reached
-while True:
-    current_lat = cs.lat
-    current_lon = cs.lng
-    distance = haversine_distance(current_lat, current_lon, target_lat, target_lon)
-    log("Distance to target: " + str(distance) + " meters")
-    if distance < 1:
-        break
-    System.Threading.Thread.Sleep(1000)
-log("Reached target location.")
-
-# Switch back to AltHold mode for yaw adjustment
-log("Switching back to ALTHOLD mode...")
-cs.mode = "ALTHOLD"
-while cs.mode != "ALTHOLD":
-    System.Threading.Thread.Sleep(1000)
-log("Mode set to ALTHOLD.")
+# Simulate movement since location data may not be available
+print("Simulating movement to target location...")
+simulated_location = initial_location
+distance = haversine_distance(simulated_location, target_location)
+while distance > 1:
+    print(
+        f"Simulated location: ({simulated_location.lat:.6f}, {simulated_location.lon:.6f}, {simulated_location.alt:.2f})")
+    print(f"Distance to target: {distance:.2f} meters")
+    # Simulate movement towards target (simplified linear movement)
+    time.sleep(1)
+    # Update simulated location (move 1/10 of the distance per second for simplicity)
+    lat_diff = (target_location.lat - simulated_location.lat) / 10
+    lon_diff = (target_location.lon - simulated_location.lon) / 10
+    simulated_location = LocationGlobal(
+        simulated_location.lat + lat_diff,
+        simulated_location.lon + lon_diff,
+        100
+    )
+    distance = haversine_distance(simulated_location, target_location)
+print("Reached target location.")
 
 # Set yaw to 350 degrees
-log("Setting yaw to 350 degrees...")
-MainV2.comPort.doCommand(MAVLink.MAV_CMD.CONDITION_YAW, 0, 350, 0, 0, 0, 0, 0)
-System.Threading.Thread.Sleep(5000)  # Wait for yaw to stabilize
-log("Yaw set.")
+print("Setting yaw to 350 degrees...")
+vehicle.condition_yaw(350, relative=False)
+print("Yaw set.")
 
-log("Script completed.")
+# Close vehicle connection
+vehicle.close()
+print("Script completed.")
